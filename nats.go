@@ -41,6 +41,7 @@ import (
 
 	"github.com/nats-io/nkeys"
 	"github.com/nats-io/nuid"
+	"github.com/quic-go/quic-go"
 
 	"github.com/nats-io/nats.go/util"
 )
@@ -499,6 +500,9 @@ type Options struct {
 
 	// SkipHostLookup skips the DNS lookup for the server hostname.
 	SkipHostLookup bool
+
+	// QUICCOnfig can be used to specify custom options for QUIC connections.
+	QUICConfig *quic.Config
 }
 
 const (
@@ -518,9 +522,10 @@ const (
 	nuidSize = 22
 
 	// Default ports used if none is specified in given URL(s)
-	defaultWSPortString  = "80"
-	defaultWSSPortString = "443"
-	defaultPortString    = "4222"
+	defaultWSPortString   = "80"
+	defaultWSSPortString  = "443"
+	defaultQUICPortString = "443"
+	defaultPortString     = "4222"
 )
 
 // A Conn represents a bare connection to a nats-server.
@@ -561,6 +566,7 @@ type Conn struct {
 	ar            bool // abort reconnect
 	rqch          chan struct{}
 	ws            bool // true if a websocket connection
+	quic          bool // true if a QUIC connection
 
 	// New style response handler
 	respSub       string               // The wildcard subject
@@ -1718,7 +1724,7 @@ func (nc *Conn) setupServerPool() error {
 
 	// Check for Scheme hint to move to TLS mode.
 	for _, srv := range nc.srvPool {
-		if srv.url.Scheme == tlsScheme || srv.url.Scheme == wsSchemeTLS {
+		if srv.url.Scheme == tlsScheme || srv.url.Scheme == wsSchemeTLS || srv.url.Scheme == quicScheme {
 			// FIXME(dlc), this is for all in the pool, should be case by case.
 			nc.Opts.Secure = true
 			if nc.Opts.TLSConfig == nil {
@@ -1732,6 +1738,9 @@ func (nc *Conn) setupServerPool() error {
 
 // Helper function to return scheme
 func (nc *Conn) connScheme() string {
+	if nc.quic {
+		return quicScheme
+	}
 	if nc.ws {
 		if nc.Opts.Secure {
 			return wsSchemeTLS
@@ -1776,19 +1785,23 @@ func (nc *Conn) addURLToPool(sURL string, implicit, saveTLSName bool) error {
 			sURL += defaultWSPortString
 		case wsSchemeTLS:
 			sURL += defaultWSSPortString
+		case quicScheme:
+			sURL += defaultQUICPortString
 		default:
 			sURL += defaultPortString
 		}
 	}
 
 	isWS := isWebsocketScheme(u)
-	// We don't support mix and match of websocket and non websocket URLs.
+	isQUIC := isQUICScheme(u)
+	// We don't support mix and match of websocket, QUIC and non websocket URLs.
 	// If this is the first URL, then we accept and switch the global state
-	// to websocket. After that, we will know how to reject mixed URLs.
+	// to websocket or QUIC. After that, we will know how to reject mixed URLs.
 	if len(nc.srvPool) == 0 {
 		nc.ws = isWS
-	} else if isWS && !nc.ws || !isWS && nc.ws {
-		return fmt.Errorf("mixing of websocket and non websocket URLs is not allowed")
+		nc.quic = isQUIC
+	} else if isWS && !nc.ws || !isWS && nc.ws || isQUIC && !nc.quic || !isQUIC && nc.quic {
+		return fmt.Errorf("mixing of websocket, QUIC and non websocket URLs is not allowed")
 	}
 
 	var tlsName string
@@ -2023,10 +2036,28 @@ func (nc *Conn) createConn() (err error) {
 	// set by the user.
 	dialer := nc.Opts.CustomDialer
 	if dialer == nil {
-		// We will copy and shorten the timeout if we have multiple hosts to try.
-		copyDialer := *nc.Opts.Dialer
-		copyDialer.Timeout = copyDialer.Timeout / time.Duration(len(hosts))
-		dialer = &copyDialer
+		if isQUICScheme(u) {
+			tlsConfig, err := nc.makeTLSConfig()
+			if err != nil {
+				return fmt.Errorf("failed to make TLS config: %w", err)
+			}
+			quicConfig := nc.Opts.QUICConfig
+			if quicConfig == nil {
+				quicConfig = &quic.Config{
+					HandshakeIdleTimeout: nc.Opts.Dialer.Timeout / time.Duration(len(hosts)),
+				}
+			}
+			dialer = &quicDialer{
+				tlsConfig:  tlsConfig,
+				quicConfig: quicConfig,
+			}
+			nc.quic = true
+		} else {
+			// We will copy and shorten the timeout if we have multiple hosts to try.
+			copyDialer := *nc.Opts.Dialer
+			copyDialer.Timeout = copyDialer.Timeout / time.Duration(len(hosts))
+			dialer = &copyDialer
+		}
 	}
 
 	if len(hosts) > 1 && !nc.Opts.NoRandomize {
@@ -2067,6 +2098,20 @@ func (nc *Conn) makeTLSConn() error {
 			return nil
 		}
 	}
+	tlsConfig, err := nc.makeTLSConfig()
+	if err != nil {
+		return err
+	}
+	nc.conn = tls.Client(nc.conn, tlsConfig)
+	conn := nc.conn.(*tls.Conn)
+	if err := conn.Handshake(); err != nil {
+		return err
+	}
+	nc.bindToNewConn()
+	return nil
+}
+
+func (nc *Conn) makeTLSConfig() (*tls.Config, error) {
 	// Allow the user to configure their own tls.Config structure.
 	tlsCopy := &tls.Config{}
 	if nc.Opts.TLSConfig != nil {
@@ -2075,14 +2120,14 @@ func (nc *Conn) makeTLSConn() error {
 	if nc.Opts.TLSCertCB != nil {
 		cert, err := nc.Opts.TLSCertCB()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		tlsCopy.Certificates = []tls.Certificate{cert}
 	}
 	if nc.Opts.RootCAsCB != nil {
 		rootCAs, err := nc.Opts.RootCAsCB()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		tlsCopy.RootCAs = rootCAs
 	}
@@ -2095,13 +2140,7 @@ func (nc *Conn) makeTLSConn() error {
 			tlsCopy.ServerName = h
 		}
 	}
-	nc.conn = tls.Client(nc.conn, tlsCopy)
-	conn := nc.conn.(*tls.Conn)
-	if err := conn.Handshake(); err != nil {
-		return err
-	}
-	nc.bindToNewConn()
-	return nil
+	return tlsCopy, nil
 }
 
 // TLSConnectionState retrieves the state of the TLS connection to the server
@@ -2296,7 +2335,7 @@ func (nc *Conn) processConnectInit() error {
 
 	// If we need to have a TLS connection and want the TLS handshake to occur
 	// first, do it now.
-	if nc.Opts.Secure && nc.Opts.TLSHandshakeFirst {
+	if nc.Opts.Secure && nc.Opts.TLSHandshakeFirst && !nc.quic {
 		if err := nc.makeTLSConn(); err != nil {
 			return err
 		}
@@ -2458,9 +2497,9 @@ func (nc *Conn) processExpectedInfo() error {
 		return ErrNkeysNotSupported
 	}
 
-	// For websocket connections, we already switched to TLS if need be,
-	// so we are done here.
-	if nc.ws {
+	// For websocket and QUIC connections, we already switched to TLS if need
+	// be, so we are done here.
+	if nc.ws || nc.quic {
 		return nil
 	}
 
