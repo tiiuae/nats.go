@@ -29,9 +29,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/internal/parser"
 	"github.com/nats-io/nuid"
+	"github.com/tiiuae/nats.go"
+	"github.com/tiiuae/nats.go/internal/parser"
 )
 
 type (

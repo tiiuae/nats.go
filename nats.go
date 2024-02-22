@@ -43,7 +43,7 @@ import (
 	"github.com/nats-io/nuid"
 	"github.com/quic-go/quic-go"
 
-	"github.com/nats-io/nats.go/util"
+	"github.com/tiiuae/nats.go/util"
 )
 
 // Default Constants

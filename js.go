@@ -27,8 +27,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/nats-io/nats.go/internal/parser"
 	"github.com/nats-io/nuid"
+	"github.com/tiiuae/nats.go/internal/parser"
 )
 
 // JetStream allows persistent messaging through JetStream.
@@ -36,7 +36,7 @@ import (
 // NOTE: JetStream is part of legacy API.
 // Users are encouraged to switch to the new JetStream API for enhanced capabilities and
 // simplified API. Please refer to the `jetstream` package.
-// See: https://github.com/nats-io/nats.go/blob/main/jetstream/README.md
+// See: https://github.com/tiiuae/nats.go/blob/main/jetstream/README.md
 type JetStream interface {
 	// Publish publishes a message to JetStream.
 	Publish(subj string, data []byte, opts ...PubOpt) (*PubAck, error)
@@ -115,7 +115,7 @@ type JetStream interface {
 // NOTE: JetStreamContext is part of legacy API.
 // Users are encouraged to switch to the new JetStream API for enhanced capabilities and
 // simplified API. Please refer to the `jetstream` package.
-// See: https://github.com/nats-io/nats.go/blob/main/jetstream/README.md
+// See: https://github.com/tiiuae/nats.go/blob/main/jetstream/README.md
 type JetStreamContext interface {
 	JetStream
 	JetStreamManager
@@ -290,7 +290,7 @@ const (
 // NOTE: JetStreamContext is part of legacy API.
 // Users are encouraged to switch to the new JetStream API for enhanced capabilities and
 // simplified API. Please refer to the `jetstream` package.
-// See: https://github.com/nats-io/nats.go/blob/main/jetstream/README.md
+// See: https://github.com/tiiuae/nats.go/blob/main/jetstream/README.md
 func (nc *Conn) JetStream(opts ...JSOpt) (JetStreamContext, error) {
 	js := &js{
 		nc: nc,

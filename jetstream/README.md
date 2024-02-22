@@ -76,8 +76,8 @@ import (
     "strconv"
     "time"
 
-    "github.com/nats-io/nats.go"
-    "github.com/nats-io/nats.go/jetstream"
+    "github.com/tiiuae/nats.go"
+    "github.com/tiiuae/nats.go/jetstream"
 )
 
 func main() {
@@ -986,4 +986,4 @@ fmt.Println(status.Size()) // prints the size of the bucket in bytes
 
 ## Examples
 
-You can find more examples of `jetstream` usage [here](https://github.com/nats-io/nats.go/tree/main/examples/jetstream).
+You can find more examples of `jetstream` usage [here](https://github.com/tiiuae/nats.go/tree/main/examples/jetstream).

@@ -1,4 +1,4 @@
-module github.com/nats-io/nats.go
+module github.com/tiiuae/nats.go
 
 go 1.21
 
