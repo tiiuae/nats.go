@@ -524,7 +524,7 @@ const (
 	// Default ports used if none is specified in given URL(s)
 	defaultWSPortString   = "80"
 	defaultWSSPortString  = "443"
-	defaultQUICPortString = "443"
+	defaultQUICPortString = "4222"
 	defaultPortString     = "4222"
 )
 
