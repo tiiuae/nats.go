@@ -892,21 +892,14 @@ func TestObjectList(t *testing.T) {
 			t.Fatalf("Expected 4 total objects, got %d", len(omap))
 		}
 		expected := map[string]struct{}{
-			"A": struct{}{},
-			"B": struct{}{},
-			"C": struct{}{},
-			"b": struct{}{},
+			"A": {},
+			"B": {},
+			"C": {},
+			"b": {},
 		}
 		if !reflect.DeepEqual(omap, expected) {
 			t.Fatalf("Expected %+v but got %+v", expected, omap)
 		}
-	})
-
-	t.Run("context timeout", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Nanosecond)
-		defer cancel()
-		_, err := root.List(nats.Context(ctx))
-		expectErr(t, err, context.DeadlineExceeded)
 	})
 }
 
@@ -1119,5 +1112,73 @@ func TestObjectStoreCompression(t *testing.T) {
 
 	if objStream.Config.Compression != nats.S2Compression {
 		t.Fatalf("Expected stream to be compressed with S2")
+	}
+}
+
+func TestObjectStoreMirror(t *testing.T) {
+	s := RunBasicJetStreamServer()
+	defer shutdownJSServerAndRemoveStorage(t, s)
+
+	nc, js := jsClient(t, s)
+	defer nc.Close()
+
+	bucketName := "test-bucket"
+
+	obs, err := js.CreateObjectStore(&nats.ObjectStoreConfig{Bucket: bucketName, Description: "testing"})
+	expectOk(t, err)
+
+	mirrorBucketName := "mirror-test-bucket"
+
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name: fmt.Sprintf("OBJ_%s", mirrorBucketName),
+		Mirror: &nats.StreamSource{
+			Name: fmt.Sprintf("OBJ_%s", bucketName),
+			SubjectTransforms: []nats.SubjectTransformConfig{
+				{
+					Source:      fmt.Sprintf("$O.%s.>", bucketName),
+					Destination: fmt.Sprintf("$O.%s.>", mirrorBucketName),
+				},
+			},
+		},
+		AllowRollup: true, // meta messages are always rollups
+	})
+	if err != nil {
+		t.Fatalf("Error creating object store bucket mirror: %v", err)
+	}
+
+	_, err = obs.PutString("A", "abc")
+	expectOk(t, err)
+
+	mirrorObs, err := js.ObjectStore(mirrorBucketName)
+	expectOk(t, err)
+
+	// Make sure we sync.
+	checkFor(t, 2*time.Second, 15*time.Millisecond, func() error {
+		mirrorValue, err := mirrorObs.GetString("A")
+		if err != nil {
+			return err
+		}
+		if mirrorValue != "abc" {
+			t.Fatalf("Expected mirrored object store value to be the same as original")
+		}
+		return nil
+	})
+
+	watcher, err := mirrorObs.Watch()
+	if err != nil {
+		t.Fatalf("Error creating watcher: %v", err)
+	}
+	defer watcher.Stop()
+
+	// expect to get one value and nil
+	for {
+		select {
+		case info := <-watcher.Updates():
+			if info == nil {
+				return
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("Expected to receive an update")
+		}
 	}
 }

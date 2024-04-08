@@ -1,4 +1,4 @@
-// Copyright 2012-2023 The NATS Authors
+// Copyright 2012-2024 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -48,7 +48,7 @@ import (
 
 // Default Constants
 const (
-	Version                   = "1.33.0"
+	Version                   = "1.34.1"
 	DefaultURL                = "nats://127.0.0.1:4222"
 	DefaultPort               = 4222
 	DefaultMaxReconnect       = 60
@@ -572,7 +572,6 @@ type Conn struct {
 	respSub       string               // The wildcard subject
 	respSubPrefix string               // the wildcard prefix including trailing .
 	respSubLen    int                  // the length of the wildcard prefix excluding trailing .
-	respScanf     string               // The scanf template to extract mux token
 	respMux       *Subscription        // A single response subscription
 	respMap       map[string]chan *Msg // Request map for the response msg channels
 	respRand      *rand.Rand           // Used for generating suffix
@@ -614,14 +613,17 @@ type Subscription struct {
 	// For holding information about a JetStream consumer.
 	jsi *jsSub
 
-	delivered  uint64
-	max        uint64
-	conn       *Conn
-	mcb        MsgHandler
-	mch        chan *Msg
-	closed     bool
-	sc         bool
-	connClosed bool
+	delivered     uint64
+	max           uint64
+	conn          *Conn
+	mcb           MsgHandler
+	mch           chan *Msg
+	closed        bool
+	sc            bool
+	connClosed    bool
+	draining      bool
+	status        SubStatus
+	statListeners map[chan SubStatus][]SubStatus
 
 	// Type of Subscription
 	typ SubscriptionType
@@ -640,6 +642,30 @@ type Subscription struct {
 	pMsgsLimit  int
 	pBytesLimit int
 	dropped     int
+}
+
+// Status represents the state of the connection.
+type SubStatus int
+
+const (
+	SubscriptionActive = SubStatus(iota)
+	SubscriptionDraining
+	SubscriptionClosed
+	SubscriptionSlowConsumer
+)
+
+func (s SubStatus) String() string {
+	switch s {
+	case SubscriptionActive:
+		return "Active"
+	case SubscriptionDraining:
+		return "Draining"
+	case SubscriptionClosed:
+		return "Closed"
+	case SubscriptionSlowConsumer:
+		return "SlowConsumer"
+	}
+	return "unknown status"
 }
 
 // Msg represents a message delivered by NATS. This structure is used
@@ -3331,6 +3357,9 @@ func (nc *Conn) processMsg(data []byte) {
 	}
 
 	// Clear any SlowConsumer status.
+	if sub.sc {
+		sub.changeSubStatus(SubscriptionActive)
+	}
 	sub.sc = false
 	sub.mu.Unlock()
 
@@ -3354,8 +3383,9 @@ slowConsumer:
 		sub.pMsgs--
 		sub.pBytes -= len(m.Data)
 	}
-	sub.mu.Unlock()
 	if sc {
+		sub.changeSubStatus(SubscriptionSlowConsumer)
+		sub.mu.Unlock()
 		// Now we need connection's lock and we may end-up in the situation
 		// that we were trying to avoid, except that in this case, the client
 		// is already experiencing client-side slow consumer situation.
@@ -3365,6 +3395,8 @@ slowConsumer:
 			nc.ach.push(func() { nc.Opts.AsyncErrorCB(nc, sub, ErrSlowConsumer) })
 		}
 		nc.mu.Unlock()
+	} else {
+		sub.mu.Unlock()
 	}
 }
 
@@ -3977,7 +4009,6 @@ func (nc *Conn) createNewRequestAndSend(subj string, hdr, data []byte) (chan *Ms
 			nc.mu.Unlock()
 			return nil, token, err
 		}
-		nc.respScanf = strings.Replace(nc.respSub, "*", "%s", -1)
 		nc.respMux = s
 	}
 	nc.mu.Unlock()
@@ -4158,16 +4189,14 @@ func (nc *Conn) NewRespInbox() string {
 }
 
 // respToken will return the last token of a literal response inbox
-// which we use for the message channel lookup. This needs to do a
-// scan to protect itself against the server changing the subject.
+// which we use for the message channel lookup. This needs to verify the subject
+// prefix matches to protect itself against the server changing the subject.
 // Lock should be held.
 func (nc *Conn) respToken(respInbox string) string {
-	var token string
-	n, err := fmt.Sscanf(respInbox, nc.respScanf, &token)
-	if err != nil || n != 1 {
-		return ""
+	if token, found := strings.CutPrefix(respInbox, nc.respSubPrefix); found {
+		return token
 	}
-	return token
+	return ""
 }
 
 // Subscribe will express interest in the given subject. The subject
@@ -4337,6 +4366,7 @@ func (nc *Conn) subscribeLocked(subj, queue string, cb MsgHandler, ch chan *Msg,
 		nc.kickFlusher()
 	}
 
+	sub.changeSubStatus(SubscriptionActive)
 	return sub, nil
 }
 
@@ -4380,6 +4410,7 @@ func (nc *Conn) removeSub(s *Subscription) {
 	}
 	// Mark as invalid
 	s.closed = true
+	s.changeSubStatus(SubscriptionClosed)
 	if s.pCond != nil {
 		s.pCond.Broadcast()
 	}
@@ -4449,6 +4480,91 @@ func (s *Subscription) Drain() error {
 	return conn.unsubscribe(s, 0, true)
 }
 
+// IsDraining returns a boolean indicating whether the subscription
+// is being drained.
+// This will return false if the subscription has already been closed.
+func (s *Subscription) IsDraining() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.draining
+}
+
+// StatusChanged returns a channel on which given list of subscription status
+// changes will be sent. If no status is provided, all status changes will be sent.
+// Available statuses are SubscriptionActive, SubscriptionDraining, SubscriptionClosed,
+// and SubscriptionSlowConsumer.
+// The returned channel will be closed when the subscription is closed.
+func (s *Subscription) StatusChanged(statuses ...SubStatus) <-chan SubStatus {
+	if len(statuses) == 0 {
+		statuses = []SubStatus{SubscriptionActive, SubscriptionDraining, SubscriptionClosed, SubscriptionSlowConsumer}
+	}
+	ch := make(chan SubStatus, 10)
+	for _, status := range statuses {
+		s.registerStatusChangeListener(status, ch)
+		// initial status
+		if status == s.status {
+			ch <- status
+		}
+	}
+	return ch
+}
+
+// registerStatusChangeListener registers a channel waiting for a specific status change event.
+// Status change events are non-blocking - if no receiver is waiting for the status change,
+// it will not be sent on the channel. Closed channels are ignored.
+func (s *Subscription) registerStatusChangeListener(status SubStatus, ch chan SubStatus) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.statListeners == nil {
+		s.statListeners = make(map[chan SubStatus][]SubStatus)
+	}
+	if _, ok := s.statListeners[ch]; !ok {
+		s.statListeners[ch] = make([]SubStatus, 0)
+	}
+	s.statListeners[ch] = append(s.statListeners[ch], status)
+}
+
+// sendStatusEvent sends subscription status event to all channels.
+// If there is no listener, sendStatusEvent
+// will not block. Lock should be held entering.
+func (s *Subscription) sendStatusEvent(status SubStatus) {
+	for ch, statuses := range s.statListeners {
+		if !containsStatus(statuses, status) {
+			continue
+		}
+		// only send event if someone's listening
+		select {
+		case ch <- status:
+		default:
+		}
+		if status == SubscriptionClosed {
+			close(ch)
+		}
+	}
+}
+
+func containsStatus(statuses []SubStatus, status SubStatus) bool {
+	for _, s := range statuses {
+		if s == status {
+			return true
+		}
+	}
+	return false
+}
+
+// changeSubStatus changes subscription status and sends events
+// to all listeners. Lock should be held entering.
+func (s *Subscription) changeSubStatus(status SubStatus) {
+	if s == nil {
+		return
+	}
+	s.sendStatusEvent(status)
+	s.status = status
+}
+
 // Unsubscribe will remove interest in the given subject.
 //
 // For a JetStream subscription, if the library has created the JetStream
@@ -4487,6 +4603,11 @@ func (s *Subscription) Unsubscribe() error {
 // checkDrained will watch for a subscription to be fully drained
 // and then remove it.
 func (nc *Conn) checkDrained(sub *Subscription) {
+	defer func() {
+		sub.mu.Lock()
+		defer sub.mu.Unlock()
+		sub.draining = false
+	}()
 	if nc == nil || sub == nil {
 		return
 	}
@@ -4596,6 +4717,10 @@ func (nc *Conn) unsubscribe(sub *Subscription, max int, drainMode bool) error {
 	}
 
 	if drainMode {
+		s.mu.Lock()
+		s.draining = true
+		sub.changeSubStatus(SubscriptionDraining)
+		s.mu.Unlock()
 		go nc.checkDrained(sub)
 	}
 
@@ -4698,6 +4823,7 @@ func (s *Subscription) validateNextMsgState(pullSubInternal bool) error {
 		return ErrSyncSubRequired
 	}
 	if s.sc {
+		s.changeSubStatus(SubscriptionActive)
 		s.sc = false
 		return ErrSlowConsumer
 	}
