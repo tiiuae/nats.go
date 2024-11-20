@@ -48,7 +48,7 @@ import (
 
 // Default Constants
 const (
-	Version                   = "1.34.1"
+	Version                   = "1.37.0"
 	DefaultURL                = "nats://127.0.0.1:4222"
 	DefaultPort               = 4222
 	DefaultMaxReconnect       = 60
@@ -87,6 +87,9 @@ const (
 
 	// MAX_CONNECTIONS_ERR is for when nats server denies the connection due to server max_connections limit
 	MAX_CONNECTIONS_ERR = "maximum connections exceeded"
+
+	// MAX_SUBSCRIPTIONS_ERR is for when nats server denies the connection due to server subscriptions limit
+	MAX_SUBSCRIPTIONS_ERR = "maximum subscriptions exceeded"
 )
 
 // Errors
@@ -132,6 +135,7 @@ var (
 	ErrNkeysNotSupported           = errors.New("nats: nkeys not supported by the server")
 	ErrStaleConnection             = errors.New("nats: " + STALE_CONNECTION)
 	ErrTokenAlreadySet             = errors.New("nats: token and token handler both set")
+	ErrUserInfoAlreadySet          = errors.New("nats: cannot set user info callback and user/pass")
 	ErrMsgNotBound                 = errors.New("nats: message is not bound to subscription/connection")
 	ErrMsgNoReply                  = errors.New("nats: message does not have a reply")
 	ErrClientIPNotSupported        = errors.New("nats: client IP not supported by this server")
@@ -141,6 +145,7 @@ var (
 	ErrNoResponders                = errors.New("nats: no responders available for request")
 	ErrMaxConnectionsExceeded      = errors.New("nats: server maximum connections exceeded")
 	ErrConnectionNotTLS            = errors.New("nats: connection is not tls")
+	ErrMaxSubscriptionsExceeded    = errors.New("nats: server maximum subscriptions exceeded")
 )
 
 // GetDefaultOptions returns default configuration options for the client.
@@ -161,7 +166,7 @@ func GetDefaultOptions() Options {
 	}
 }
 
-// DEPRECATED: Use GetDefaultOptions() instead.
+// Deprecated: Use GetDefaultOptions() instead.
 // DefaultOptions is not safe for use by multiple clients.
 // For details see #308.
 var DefaultOptions = GetDefaultOptions()
@@ -230,6 +235,9 @@ type SignatureHandler func([]byte) ([]byte, error)
 
 // AuthTokenHandler is used to generate a new token.
 type AuthTokenHandler func() string
+
+// UserInfoCB is used to pass the username and password when establishing connection.
+type UserInfoCB func() (string, string)
 
 // ReconnectDelayHandler is used to get from the user the desired
 // delay the library should pause before attempting to reconnect
@@ -387,7 +395,7 @@ type Options struct {
 	// DisconnectedCB sets the disconnected handler that is called
 	// whenever the connection is disconnected.
 	// Will not be called if DisconnectedErrCB is set
-	// DEPRECATED. Use DisconnectedErrCB which passes error that caused
+	// Deprecated. Use DisconnectedErrCB which passes error that caused
 	// the disconnect event.
 	DisconnectedCB ConnHandler
 
@@ -444,6 +452,9 @@ type Options struct {
 	// Password sets the password to be used when connecting to a server.
 	Password string
 
+	// UserInfo sets the callback handler that will fetch the username and password.
+	UserInfo UserInfoCB
+
 	// Token sets the token to be used when connecting to a server.
 	Token string
 
@@ -451,7 +462,7 @@ type Options struct {
 	TokenHandler AuthTokenHandler
 
 	// Dialer allows a custom net.Dialer when forming connections.
-	// DEPRECATED: should use CustomDialer instead.
+	// Deprecated: should use CustomDialer instead.
 	Dialer *net.Dialer
 
 	// CustomDialer allows to specify a custom dialer (not necessarily
@@ -1114,7 +1125,7 @@ func DisconnectErrHandler(cb ConnErrHandler) Option {
 }
 
 // DisconnectHandler is an Option to set the disconnected handler.
-// DEPRECATED: Use DisconnectErrHandler.
+// Deprecated: Use DisconnectErrHandler.
 func DisconnectHandler(cb ConnHandler) Option {
 	return func(o *Options) error {
 		o.DisconnectedCB = cb
@@ -1168,6 +1179,13 @@ func UserInfo(user, password string) Option {
 	return func(o *Options) error {
 		o.User = user
 		o.Password = password
+		return nil
+	}
+}
+
+func UserInfoHandler(cb UserInfoCB) Option {
+	return func(o *Options) error {
+		o.UserInfo = cb
 		return nil
 	}
 }
@@ -1286,7 +1304,7 @@ func SyncQueueLen(max int) Option {
 
 // Dialer is an Option to set the dialer which will be used when
 // attempting to establish a connection.
-// DEPRECATED: Should use CustomDialer instead.
+// Deprecated: Should use CustomDialer instead.
 func Dialer(dialer *net.Dialer) Option {
 	return func(o *Options) error {
 		o.Dialer = dialer
@@ -1365,7 +1383,7 @@ func ProxyPath(path string) Option {
 func CustomInboxPrefix(p string) Option {
 	return func(o *Options) error {
 		if p == "" || strings.Contains(p, ">") || strings.Contains(p, "*") || strings.HasSuffix(p, ".") {
-			return fmt.Errorf("nats: invalid custom prefix")
+			return errors.New("nats: invalid custom prefix")
 		}
 		o.InboxPrefix = p
 		return nil
@@ -1403,7 +1421,7 @@ func TLSHandshakeFirst() Option {
 // Handler processing
 
 // SetDisconnectHandler will set the disconnect event handler.
-// DEPRECATED: Use SetDisconnectErrHandler
+// Deprecated: Use SetDisconnectErrHandler
 func (nc *Conn) SetDisconnectHandler(dcb ConnHandler) {
 	if nc == nil {
 		return
@@ -1519,7 +1537,7 @@ func processUrlString(url string) []string {
 	urls := strings.Split(url, ",")
 	var j int
 	for _, s := range urls {
-		u := strings.TrimSpace(s)
+		u := strings.TrimSuffix(strings.TrimSpace(s), "/")
 		if len(u) > 0 {
 			urls[j] = u
 			j++
@@ -1827,7 +1845,7 @@ func (nc *Conn) addURLToPool(sURL string, implicit, saveTLSName bool) error {
 		nc.ws = isWS
 		nc.quic = isQUIC
 	} else if isWS && !nc.ws || !isWS && nc.ws || isQUIC && !nc.quic || !isQUIC && nc.quic {
-		return fmt.Errorf("mixing of websocket, QUIC and non websocket URLs is not allowed")
+		return errors.New("mixing of websocket, QUIC and non websocket URLs is not allowed")
 	}
 
 	var tlsName string
@@ -2200,6 +2218,47 @@ func (nc *Conn) waitForExits() {
 	nc.wg.Wait()
 }
 
+// ForceReconnect forces a reconnect attempt to the server.
+// This is a non-blocking call and will start the reconnect
+// process without waiting for it to complete.
+//
+// If the connection is already in the process of reconnecting,
+// this call will force an immediate reconnect attempt (bypassing
+// the current reconnect delay).
+func (nc *Conn) ForceReconnect() error {
+	nc.mu.Lock()
+	defer nc.mu.Unlock()
+
+	if nc.isClosed() {
+		return ErrConnectionClosed
+	}
+	if nc.isReconnecting() {
+		// if we're already reconnecting, force a reconnect attempt
+		// even if we're in the middle of a backoff
+		if nc.rqch != nil {
+			close(nc.rqch)
+		}
+		return nil
+	}
+
+	// Clear any queued pongs
+	nc.clearPendingFlushCalls()
+
+	// Clear any queued and blocking requests.
+	nc.clearPendingRequestCalls()
+
+	// Stop ping timer if set.
+	nc.stopPingTimer()
+
+	// Go ahead and make sure we have flushed the outbound
+	nc.bw.flush()
+	nc.conn.Close()
+
+	nc.changeConnStatus(RECONNECTING)
+	go nc.doReconnect(nil, true)
+	return nil
+}
+
 // ConnectedUrl reports the connected server's URL
 func (nc *Conn) ConnectedUrl() string {
 	if nc == nil {
@@ -2459,7 +2518,7 @@ func (nc *Conn) connect() (bool, error) {
 		nc.setup()
 		nc.changeConnStatus(RECONNECTING)
 		nc.bw.switchToPending()
-		go nc.doReconnect(ErrNoServers)
+		go nc.doReconnect(ErrNoServers, false)
 		err = nil
 	} else {
 		nc.current = nil
@@ -2561,6 +2620,13 @@ func (nc *Conn) connectProto() (string, error) {
 		pass = o.Password
 		token = o.Token
 		nkey = o.Nkey
+
+		if nc.Opts.UserInfo != nil {
+			if user != _EMPTY_ || pass != _EMPTY_ {
+				return _EMPTY_, ErrUserInfoAlreadySet
+			}
+			user, pass = nc.Opts.UserInfo()
+		}
 	}
 
 	// Look for user jwt.
@@ -2759,7 +2825,7 @@ func (nc *Conn) stopPingTimer() {
 
 // Try to reconnect using the option parameters.
 // This function assumes we are allowed to reconnect.
-func (nc *Conn) doReconnect(err error) {
+func (nc *Conn) doReconnect(err error, forceReconnect bool) {
 	// We want to make sure we have the other watchers shutdown properly
 	// here before we proceed past this point.
 	nc.waitForExits()
@@ -2815,7 +2881,8 @@ func (nc *Conn) doReconnect(err error) {
 			break
 		}
 
-		doSleep := i+1 >= len(nc.srvPool)
+		doSleep := i+1 >= len(nc.srvPool) && !forceReconnect
+		forceReconnect = false
 		nc.mu.Unlock()
 
 		if !doSleep {
@@ -2842,6 +2909,12 @@ func (nc *Conn) doReconnect(err error) {
 			select {
 			case <-rqch:
 				rt.Stop()
+
+				// we need to reset the rqch channel to avoid
+				// closing a closed channel in the next iteration
+				nc.mu.Lock()
+				nc.rqch = make(chan struct{})
+				nc.mu.Unlock()
 			case <-rt.C:
 			}
 		}
@@ -2911,17 +2984,18 @@ func (nc *Conn) doReconnect(err error) {
 		// Done with the pending buffer
 		nc.bw.doneWithPending()
 
-		// This is where we are truly connected.
-		nc.status = CONNECTED
+		// Queue up the correct callback. If we are in initial connect state
+		// (using retry on failed connect), we will call the ConnectedCB,
+		// otherwise the ReconnectedCB.
+		if nc.Opts.ReconnectedCB != nil && !nc.initc {
+			nc.ach.push(func() { nc.Opts.ReconnectedCB(nc) })
+		} else if nc.Opts.ConnectedCB != nil && nc.initc {
+			nc.ach.push(func() { nc.Opts.ConnectedCB(nc) })
+		}
 
 		// If we are here with a retry on failed connect, indicate that the
 		// initial connect is now complete.
 		nc.initc = false
-
-		// Queue up the reconnect callback.
-		if nc.Opts.ReconnectedCB != nil {
-			nc.ach.push(func() { nc.Opts.ReconnectedCB(nc) })
-		}
 
 		// Release lock here, we will return below.
 		nc.mu.Unlock()
@@ -2942,11 +3016,11 @@ func (nc *Conn) doReconnect(err error) {
 
 // processOpErr handles errors from reading or parsing the protocol.
 // The lock should not be held entering this function.
-func (nc *Conn) processOpErr(err error) {
+func (nc *Conn) processOpErr(err error) bool {
 	nc.mu.Lock()
+	defer nc.mu.Unlock()
 	if nc.isConnecting() || nc.isClosed() || nc.isReconnecting() {
-		nc.mu.Unlock()
-		return
+		return false
 	}
 
 	if nc.Opts.AllowReconnect && nc.status == CONNECTED {
@@ -2965,15 +3039,13 @@ func (nc *Conn) processOpErr(err error) {
 		// Clear any queued pongs, e.g. pending flush calls.
 		nc.clearPendingFlushCalls()
 
-		go nc.doReconnect(err)
-		nc.mu.Unlock()
-		return
+		go nc.doReconnect(err, false)
+		return false
 	}
 
 	nc.changeConnStatus(DISCONNECTED)
 	nc.err = err
-	nc.mu.Unlock()
-	nc.close(CLOSED, true, nil)
+	return true
 }
 
 // dispatch is responsible for calling any async callbacks
@@ -3070,7 +3142,9 @@ func (nc *Conn) readLoop() {
 			err = nc.parse(buf)
 		}
 		if err != nil {
-			nc.processOpErr(err)
+			if shouldClose := nc.processOpErr(err); shouldClose {
+				nc.close(CLOSED, true, nil)
+			}
 			break
 		}
 	}
@@ -3400,15 +3474,17 @@ slowConsumer:
 	}
 }
 
-// processPermissionsViolation is called when the server signals a subject
-// permissions violation on either publish or subscribe.
-func (nc *Conn) processPermissionsViolation(err string) {
+// processTransientError is called when the server signals a non terminal error
+// which does not close the connection or trigger a reconnect.
+// This will trigger the async error callback if set.
+// These errors include the following:
+// - permissions violation on publish or subscribe
+// - maximum subscriptions exceeded
+func (nc *Conn) processTransientError(err error) {
 	nc.mu.Lock()
-	// create error here so we can pass it as a closure to the async cb dispatcher.
-	e := errors.New("nats: " + err)
-	nc.err = e
+	nc.err = err
 	if nc.Opts.AsyncErrorCB != nil {
-		nc.ach.push(func() { nc.Opts.AsyncErrorCB(nc, nil, e) })
+		nc.ach.push(func() { nc.Opts.AsyncErrorCB(nc, nil, err) })
 	}
 	nc.mu.Unlock()
 }
@@ -3640,15 +3716,17 @@ func (nc *Conn) processErr(ie string) {
 	// convert to lower case.
 	e := strings.ToLower(ne)
 
-	close := false
+	var close bool
 
 	// FIXME(dlc) - process Slow Consumer signals special.
 	if e == STALE_CONNECTION {
-		nc.processOpErr(ErrStaleConnection)
+		close = nc.processOpErr(ErrStaleConnection)
 	} else if e == MAX_CONNECTIONS_ERR {
-		nc.processOpErr(ErrMaxConnectionsExceeded)
+		close = nc.processOpErr(ErrMaxConnectionsExceeded)
 	} else if strings.HasPrefix(e, PERMISSIONS_ERR) {
-		nc.processPermissionsViolation(ne)
+		nc.processTransientError(fmt.Errorf("nats: %s", ne))
+	} else if strings.HasPrefix(e, MAX_SUBSCRIPTIONS_ERR) {
+		nc.processTransientError(ErrMaxSubscriptionsExceeded)
 	} else if authErr := checkAuthError(e); authErr != nil {
 		nc.mu.Lock()
 		close = nc.processAuthError(authErr)
@@ -3792,7 +3870,7 @@ func readMIMEHeader(tp *textproto.Reader) (textproto.MIMEHeader, error) {
 		}
 
 		// Process key fetching original case.
-		i := bytes.IndexByte([]byte(kv), ':')
+		i := strings.IndexByte(kv, ':')
 		if i < 0 {
 			return nil, ErrBadHeaderMsg
 		}
@@ -3805,8 +3883,7 @@ func readMIMEHeader(tp *textproto.Reader) (textproto.MIMEHeader, error) {
 		for i < len(kv) && (kv[i] == ' ' || kv[i] == '\t') {
 			i++
 		}
-		value := string(kv[i:])
-		m[key] = append(m[key], value)
+		m[key] = append(m[key], kv[i:])
 		if err != nil {
 			return m, err
 		}
@@ -4893,7 +4970,8 @@ func (s *Subscription) processNextMsgDelivered(msg *Msg) error {
 }
 
 // Queued returns the number of queued messages in the client for this subscription.
-// DEPRECATED: Use Pending()
+//
+// Deprecated: Use Pending()
 func (s *Subscription) QueuedMsgs() (int, error) {
 	m, _, err := s.Pending()
 	return int(m), err
@@ -5097,7 +5175,9 @@ func (nc *Conn) processPingTimer() {
 	nc.pout++
 	if nc.pout > nc.Opts.MaxPingsOut {
 		nc.mu.Unlock()
-		nc.processOpErr(ErrStaleConnection)
+		if shouldClose := nc.processOpErr(ErrStaleConnection); shouldClose {
+			nc.close(CLOSED, true, nil)
+		}
 		return
 	}
 
@@ -5474,7 +5554,7 @@ func (nc *Conn) drainConnection() {
 // Drain will put a connection into a drain state. All subscriptions will
 // immediately be put into a drain state. Upon completion, the publishers
 // will be drained and can not publish any additional messages. Upon draining
-// of the publishers, the connection will be closed. Use the ClosedCB()
+// of the publishers, the connection will be closed. Use the ClosedCB
 // option to know when the connection has moved from draining to closed.
 //
 // See note in Subscription.Drain for JetStream subscriptions.
@@ -5782,7 +5862,7 @@ func NkeyOptionFromSeed(seedFile string) (Option, error) {
 		return nil, err
 	}
 	if !nkeys.IsValidPublicUserKey(pub) {
-		return nil, fmt.Errorf("nats: Not a valid nkey user seed")
+		return nil, errors.New("nats: Not a valid nkey user seed")
 	}
 	sigCB := func(nonce []byte) ([]byte, error) {
 		return sigHandler(nonce, seedFile)

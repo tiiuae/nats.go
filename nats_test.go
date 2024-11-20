@@ -94,10 +94,11 @@ func checkErrChannel(t *testing.T, errCh chan error) {
 }
 
 func TestVersionMatchesTag(t *testing.T) {
-	tag := os.Getenv("TRAVIS_TAG")
-	if tag == "" {
+	refType := os.Getenv("GITHUB_REF_TYPE")
+	if refType != "tag" {
 		t.SkipNow()
 	}
+	tag := os.Getenv("GITHUB_REF_NAME")
 	// We expect a tag of the form vX.Y.Z. If that's not the case,
 	// we need someone to have a look. So fail if first letter is not
 	// a `v`
@@ -229,6 +230,7 @@ func TestSimplifiedURLs(t *testing.T) {
 		{
 			"nats",
 			[]string{
+				"nats://host1:1234/",
 				"nats://host1:1234",
 				"nats://host2:",
 				"nats://host3",
@@ -242,6 +244,7 @@ func TestSimplifiedURLs(t *testing.T) {
 				"[17:18:19:20]:1234",
 			},
 			[]string{
+				"nats://host1:1234/",
 				"nats://host1:1234",
 				"nats://host2:4222",
 				"nats://host3:4222",
@@ -434,6 +437,7 @@ func TestUrlArgument(t *testing.T) {
 	check("nats://localhost:1222 ", oneExpected)
 	check(" nats://localhost:1222", oneExpected)
 	check(" nats://localhost:1222 ", oneExpected)
+	check("nats://localhost:1222/", oneExpected)
 
 	var multiExpected = []string{
 		"nats://localhost:1222",
@@ -445,6 +449,7 @@ func TestUrlArgument(t *testing.T) {
 	check("nats://localhost:1222, nats://localhost:1223, nats://localhost:1224", multiExpected)
 	check(" nats://localhost:1222, nats://localhost:1223, nats://localhost:1224 ", multiExpected)
 	check("nats://localhost:1222,   nats://localhost:1223  ,nats://localhost:1224", multiExpected)
+	check("nats://localhost:1222/,nats://localhost:1223/,nats://localhost:1224/", multiExpected)
 }
 
 func TestParserPing(t *testing.T) {

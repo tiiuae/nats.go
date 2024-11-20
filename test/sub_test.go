@@ -16,6 +16,7 @@ package test
 import (
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1120,7 +1121,7 @@ func TestAsyncSubscriptionPending(t *testing.T) {
 	}
 
 	// Test old way
-	q, _ := sub.QueuedMsgs()
+	q, _, _ := sub.Pending()
 	if q != total && q != total-1 {
 		t.Fatalf("Expected %d or %d, got %d", total, total-1, q)
 	}
@@ -1271,7 +1272,7 @@ func TestSyncSubscriptionPending(t *testing.T) {
 	nc.Flush()
 
 	// Test old way
-	q, _ := sub.QueuedMsgs()
+	q, _, _ := sub.Pending()
 	if q != total && q != total-1 {
 		t.Fatalf("Expected %d or %d, got %d", total, total-1, q)
 	}
@@ -1319,10 +1320,10 @@ func TestSetPendingLimits(t *testing.T) {
 	// Check for invalid values
 	invalid := func() error {
 		if err := sub.SetPendingLimits(0, 1); err == nil {
-			return fmt.Errorf("Setting limit with 0 should fail")
+			return errors.New("Setting limit with 0 should fail")
 		}
 		if err := sub.SetPendingLimits(1, 0); err == nil {
-			return fmt.Errorf("Setting limit with 0 should fail")
+			return errors.New("Setting limit with 0 should fail")
 		}
 		return nil
 	}
@@ -1617,18 +1618,6 @@ func TestSubscribe_ClosedHandler(t *testing.T) {
 }
 
 func TestSubscriptionEvents(t *testing.T) {
-
-	waitForStatus := func(t *testing.T, ch <-chan nats.SubStatus, expected nats.SubStatus) {
-		t.Helper()
-		select {
-		case s := <-ch:
-			if s != expected {
-				t.Fatalf("Expected status: %s; got: %s", expected, s)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf("Timeout waiting for status %q", expected)
-		}
-	}
 	t.Run("default events", func(t *testing.T) {
 		s := RunDefaultServer()
 		defer s.Shutdown()
@@ -1651,19 +1640,19 @@ func TestSubscriptionEvents(t *testing.T) {
 		status := sub.StatusChanged()
 
 		// initial status
-		waitForStatus(t, status, nats.SubscriptionActive)
+		WaitOnChannel(t, status, nats.SubscriptionActive)
 
 		for i := 0; i < 11; i++ {
 			nc.Publish("foo", []byte("Hello"))
 		}
-		waitForStatus(t, status, nats.SubscriptionSlowConsumer)
+		WaitOnChannel(t, status, nats.SubscriptionSlowConsumer)
 		close(blockChan)
 
 		sub.Drain()
 
-		waitForStatus(t, status, nats.SubscriptionDraining)
+		WaitOnChannel(t, status, nats.SubscriptionDraining)
 
-		waitForStatus(t, status, nats.SubscriptionClosed)
+		WaitOnChannel(t, status, nats.SubscriptionClosed)
 	})
 
 	t.Run("slow consumer event only", func(t *testing.T) {
@@ -1691,7 +1680,7 @@ func TestSubscriptionEvents(t *testing.T) {
 		for i := 0; i < 20; i++ {
 			nc.Publish("foo", []byte("Hello"))
 		}
-		waitForStatus(t, status, nats.SubscriptionSlowConsumer)
+		WaitOnChannel(t, status, nats.SubscriptionSlowConsumer)
 		close(blockChan)
 
 		// now try with sync sub
@@ -1706,7 +1695,7 @@ func TestSubscriptionEvents(t *testing.T) {
 		for i := 0; i < 20; i++ {
 			nc.Publish("foo", []byte("Hello"))
 		}
-		waitForStatus(t, status, nats.SubscriptionSlowConsumer)
+		WaitOnChannel(t, status, nats.SubscriptionSlowConsumer)
 	})
 
 	t.Run("do not block channel if it's not read", func(t *testing.T) {
@@ -1730,7 +1719,7 @@ func TestSubscriptionEvents(t *testing.T) {
 		}
 		sub.SetPendingLimits(10, 1024)
 		status := sub.StatusChanged()
-		waitForStatus(t, status, nats.SubscriptionActive)
+		WaitOnChannel(t, status, nats.SubscriptionActive)
 
 		// chan length is 10, so make sure we switch state more times
 		for i := 0; i < 20; i++ {
@@ -1748,4 +1737,36 @@ func TestSubscriptionEvents(t *testing.T) {
 		// do not read from subscription
 		close(blockChan)
 	})
+}
+
+func TestMaxSubscriptionsExceeded(t *testing.T) {
+	conf := createConfFile(t, []byte(`
+	listen: 127.0.0.1:-1
+	max_subscriptions: 5
+	`))
+	defer os.Remove(conf)
+	s, _ := RunServerWithConfig(conf)
+	defer s.Shutdown()
+
+	ch := make(chan error)
+	nc, err := nats.Connect(s.ClientURL(), nats.ErrorHandler(func(c *nats.Conn, s *nats.Subscription, err error) {
+		ch <- err
+	}))
+	if err != nil {
+		t.Fatalf("Error on connect: %v", err)
+	}
+	defer nc.Close()
+
+	for i := 0; i < 6; i++ {
+		s, err := nc.Subscribe("foo", func(_ *nats.Msg) {})
+		if err != nil {
+			t.Fatalf("Error subscribing: %v", err)
+		}
+		defer s.Unsubscribe()
+	}
+
+	WaitOnChannel(t, ch, nats.ErrMaxSubscriptionsExceeded)
+
+	// wait for the server to process the SUBs
+	time.Sleep(100 * time.Millisecond)
 }
