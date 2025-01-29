@@ -243,6 +243,9 @@ type StreamConfig struct {
 	// Template identifies the template that manages the Stream. Deprecated:
 	// This feature is no longer supported.
 	Template string `json:"template_owner,omitempty"`
+
+	// IsClusteredSource indicates that this stream is a source for a clustered stream.
+	IsClusteredSource bool `json:"is_clustered_source"`
 }
 
 // SubjectTransformConfig is for applying a subject transform (to matching messages) before doing anything else when a new message is received.
