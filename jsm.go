@@ -251,6 +251,9 @@ type StreamConfig struct {
 	// Enables and sets a duration for adding server markers for delete, purge and max age limits.
 	// This feature requires nats-server v2.11.0 or later.
 	SubjectDeleteMarkerTTL time.Duration `json:"subject_delete_marker_ttl,omitempty"`
+
+	// IsClusteredSource indicates that this stream is a source for a clustered stream.
+	IsClusteredSource bool `json:"is_clustered_source"`
 }
 
 // SubjectTransformConfig is for applying a subject transform (to matching messages) before doing anything else when a new message is received.
