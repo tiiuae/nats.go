@@ -246,6 +246,18 @@ type StreamConfig struct {
 
 	// IsClusteredSource indicates that this stream is a source for a clustered stream.
 	IsClusteredSource bool `json:"is_clustered_source"`
+
+	// CheckMessageDependencies indicates that the stream will require inbound message dependencies to be resolved before accepting the message to the stream.
+	CheckMessageDependencies bool `json:"check_message_dependencies"`
+
+	// DelayedMessagesSoftLimit is the soft limit for the number of delayed messages that can be stored in memory before error logging starts. Defaults to 100.
+	DelayedMessagesSoftLimit int `json:"delayed_messages_soft_limit"`
+
+	// MessageDependenciesEnabled indicates that the stream will track message dependencies for messages stored in this stream. Used in conjunction with MessageDependencyStreams.
+	MessageDependenciesEnabled bool `json:"message_dependencies_enabled"`
+
+	// MessageDependencyStreams is a list of streams that this stream will use when calculating outbound message dependencies.
+	MessageDependencyStreams []string `json:"message_dependency_streams"`
 }
 
 // SubjectTransformConfig is for applying a subject transform (to matching messages) before doing anything else when a new message is received.
