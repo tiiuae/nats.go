@@ -252,8 +252,8 @@ type StreamConfig struct {
 	// This feature requires nats-server v2.11.0 or later.
 	SubjectDeleteMarkerTTL time.Duration `json:"subject_delete_marker_ttl,omitempty"`
 
-	// IsClusteredSource indicates that this stream is a source for a clustered stream.
-	IsClusteredSource bool `json:"is_clustered_source"`
+	// DeduplicateByClusteredMessageSequence indicates that the stream will use the message sequence as part of the deduplication check.
+	DeduplicateByClusteredMessageSequence bool `json:"deduplicate_by_clustered_message_sequence"`
 
 	// CheckMessageDependencies indicates that the stream will require inbound message dependencies to be resolved before accepting the message to the stream.
 	CheckMessageDependencies bool `json:"check_message_dependencies"`
