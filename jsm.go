@@ -251,6 +251,24 @@ type StreamConfig struct {
 	// Enables and sets a duration for adding server markers for delete, purge and max age limits.
 	// This feature requires nats-server v2.11.0 or later.
 	SubjectDeleteMarkerTTL time.Duration `json:"subject_delete_marker_ttl,omitempty"`
+
+	// DeduplicateByClusteredMessageSequence indicates that the stream will use the message sequence as part of the deduplication check.
+	DeduplicateByClusteredMessageSequence bool `json:"deduplicate_by_clustered_message_sequence"`
+
+	// DeduplicateByClusteredSubject indicates that the stream will use the subject of the message as part of the deduplication check.
+	DeduplicateByClusteredSubject bool `json:"deduplicate_by_clustered_subject"`
+
+	// CheckMessageDependencies indicates that the stream will require inbound message dependencies to be resolved before accepting the message to the stream.
+	CheckMessageDependencies bool `json:"check_message_dependencies"`
+
+	// DelayedMessagesSoftLimit is the soft limit for the number of delayed messages that can be stored in memory before error logging starts. Defaults to 100.
+	DelayedMessagesSoftLimit int `json:"delayed_messages_soft_limit"`
+
+	// MessageDependenciesEnabled indicates that the stream will track message dependencies for messages stored in this stream. Used in conjunction with MessageDependencyStreams.
+	MessageDependenciesEnabled bool `json:"message_dependencies_enabled"`
+
+	// MessageDependencyStreams is a list of streams that this stream will use when calculating outbound message dependencies.
+	MessageDependencyStreams []string `json:"message_dependency_streams"`
 }
 
 // SubjectTransformConfig is for applying a subject transform (to matching messages) before doing anything else when a new message is received.
